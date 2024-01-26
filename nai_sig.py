@@ -1,4 +1,3 @@
-# Requirements: pip install pynacl pydantic
 from PIL import Image
 import argparse
 import numpy as np
@@ -6,94 +5,65 @@ import json
 import base64
 from nacl.encoding import Base64Encoder
 from nacl.signing import VerifyKey
-from typing import Union
-import os
-import sys
-from typing import Any
 from PIL import Image
 import numpy as np
-import gzip
+import base64
 import json
-import yaml
-from typing import Union
 
-class LSBExtractor:
-    def __init__(self, data):
-        self.data = data
-        self.rows, self.cols, self.dim = data.shape
-        self.bits = 0
-        self.byte = 0
-        self.row = 0
-        self.col = 0
+from nai_bch import fec_decode
+from nai_add_fec import add_fec
+from nai_meta import extract_image_metadata
 
-    def _extract_next_bit(self):
-        if self.row < self.rows and self.col < self.cols:
-            bit = self.data[self.row, self.col, self.dim - 1] & 1
-            self.bits += 1
-            self.byte <<= 1
-            self.byte |= bit
-            self.row += 1
-            if self.row == self.rows:
-                self.row = 0
-                self.col += 1
+def verify_latents(image: Image.Image, signed_hash: bytes ,verify_key: VerifyKey) -> bool:
+    image.load()
+    sig = None
+    latents = None
+    try:
+        for cid, data, after_idat in image.private_chunks:
+            if after_idat:
+                if cid == b'ltns':
+                    sig = data
+                elif cid == b'ltnt':
+                    latents = data
+    except:
+        return True, False, None
+    if sig is None or latents is None:
+        return True, False, None
+    if not sig.startswith(b'NovelAI_ltntsig'):
+        return False, False, None
+    sig = sig[len(b'NovelAI_ltntsig'):]
+    if not latents.startswith(b'NovelAI_latents'):
+        return False, False, None
+    latents = latents[len(b'NovelAI_latents'):]
+    if len(sig) != 64:
+        return False, False, None
+    w, h = image.size
+    base_size = (w // 8) * (h // 8) * 4
+    if len(latents) != base_size * 4 and len(latents) != base_size * 2:
+        return False, False, None
+    float_dim = 4 if len(latents) == base_size * 4 else 2
+    try:
+        verify_key.verify(signed_hash + latents, sig)
+        return True, True, (float_dim, latents)
+    except:
+        return False, False, None
 
-    def get_one_byte(self):
-        while self.bits < 8:
-            self._extract_next_bit()
-        byte = bytearray([self.byte])
-        self.bits = 0
-        self.byte = 0
-        return byte
-
-    def get_next_n_bytes(self, n):
-        bytes_list = bytearray()
-        for _ in range(n):
-            byte = self.get_one_byte()
-            if not byte:
-                break
-            bytes_list.extend(byte)
-        return bytes_list
-
-    def read_32bit_integer(self):
-        bytes_list = self.get_next_n_bytes(4)
-        if len(bytes_list) == 4:
-            integer_value = int.from_bytes(bytes_list, byteorder='big')
-            return integer_value
-        else:
-            return None
-
-def extract_image_metadata(image: Union[Image.Image, np.ndarray]) -> dict:
-    if isinstance(image, Image.Image):
-        image = np.array(image)
-
-    assert image.shape[-1] == 4 and len(image.shape) == 3, "image format"
-    reader = LSBExtractor(image)
-    magic = "stealth_pngcomp"
-    read_magic = reader.get_next_n_bytes(len(magic)).decode("utf-8")
-    assert magic == read_magic, "magic number"
-    read_len = reader.read_32bit_integer() // 8
-    json_data = reader.get_next_n_bytes(read_len)
-    json_data = json.loads(gzip.decompress(json_data).decode("utf-8"))
-    if "Comment" in json_data:
-        json_data["Comment"] = json.loads(json_data["Comment"])
-
-    return json_data
-
-def verify_image_is_novelai(image: Union[Image.Image, np.ndarray], verify_key_hex: str="Y2JcQAOhLwzwSDUJPNgL04nS0Tbqm7cSRc4xk0vRMic=") -> bool:
-    if isinstance(image, Image.Image):
-        image = np.array(image)
-
-    metadata = extract_image_metadata(image)
+def verify_image_is_novelai(image: Image.Image, verify_key_hex: str="Y2JcQAOhLwzwSDUJPNgL04nS0Tbqm7cSRc4xk0vRMic=", output_fixed: bool=False) -> bool:
+    metadata, fec_data = extract_image_metadata(image, get_fec=True)
+    w, h = image.size
 
     if metadata is None:
-        raise RuntimeError("No metadata found in image")
+        #raise RuntimeError("No metadata found in image")
+        return False, False, None, None, None
 
     if "Comment" not in metadata:
-        raise RuntimeError("Comment not in metadata")
+        #raise RuntimeError("Comment not in metadata")
+        return False, False, None, None, None
 
     comment = metadata["Comment"]
     if "signed_hash" not in comment:
-        raise RuntimeError("signed_hash not in comment")
+        #raise RuntimeError("signed_hash not in comment")
+        return False, False, None, None, None
 
     signed_hash = comment["signed_hash"].encode("utf-8")
     signed_hash = base64.b64decode(signed_hash)
@@ -101,22 +71,53 @@ def verify_image_is_novelai(image: Union[Image.Image, np.ndarray], verify_key_he
 
     verify_key_hex = verify_key_hex.encode("utf-8")
     verify_key = VerifyKey(verify_key_hex, encoder=Base64Encoder)
-    image_and_comment = image[:, :, :3].tobytes() + json.dumps(comment).encode("utf-8")
+
+    good_latents, have_latents, latents = verify_latents(image, signed_hash, verify_key)
+    if not good_latents:
+        return False, False, None, None, None
+
+    np_img = np.array(image)
+    rgb = np_img[:, :, :3].tobytes()
+    json_data = json.dumps(comment).encode("utf-8")
+    image_and_comment = rgb + json_data
+    fixed_png = None
+    errs = 0
+
     try:
         verify_key.verify(image_and_comment, signed_hash)
     except:
-        return False
+        try:
+            rgb, errs = fec_decode(bytearray(rgb), bytearray(fec_data), w, h)
+            image_and_comment = rgb + json_data
+            verify_key.verify(image_and_comment, signed_hash)
+            if output_fixed:
+                rgb = np.frombuffer(rgb, dtype=np.uint8)
+                fixed_png = add_fec(image, rgb.reshape(np_img.shape[:2] + (3,)))
+        except:
+            return False, False, None, None, None
 
-    return True
+    return True, have_latents, errs, fixed_png, latents
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("image_path", type=str, help="Path to image to check")
+    parser.add_argument("-i", "--input", type=str, help="Path to image to check", required=True)
+    parser.add_argument("-f", "--fixed-output", type=str, help="If error correction takes place and a filename is specified, the corrected RGB data is written to it")
     args = parser.parse_args()
 
-    image_path = args.image_path
+    image_path = args.input
     print(f"Checking image at {image_path}")
     image = Image.open(image_path)
-    image = np.array(image)
-    is_novelai = verify_image_is_novelai(image)
+    import time
+    t = time.perf_counter()
+    is_novelai, have_latents, errs, fixed_png, latents = verify_image_is_novelai(image, output_fixed=args.fixed_output is not None)
+    if errs is not None and errs > 0:
+        print(f"Corrected pixel error bits: {errs}")
+    print (f"Time taken: {time.perf_counter() - t:.4f}s")
     print(f"Is image NovelAI? {is_novelai}")
+    if have_latents:
+        print(f"Has latents. Width: {latents[0]}")
+
+    if args.fixed_output is not None and fixed_png is not None:
+        with open(args.fixed_output, "wb") as f:
+            f.write(fixed_png)
+        print(f"Fixed image written to {args.fixed_output}")
