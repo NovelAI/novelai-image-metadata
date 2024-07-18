@@ -4,6 +4,10 @@ import time
 import numpy as np
 import functools
 
+correctable_bits = 16
+block_length = 2019
+code_block_len = 1920
+
 def bit_shuffle(data_bytes, w, h, use_bytes=False):
     bits = np.frombuffer(data_bytes, dtype=np.uint8)
     bit_fac = 8
