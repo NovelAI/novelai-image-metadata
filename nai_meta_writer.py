@@ -74,9 +74,9 @@ def inject_data(image: Image.Image, data: PngInfo, raw_metadata: bytes = None) -
         data = serialize_metadata(data)
     injector.put_32bit_integer(len(data) * 8)
     injector.put_bytes(data)
-    fec_data = fec_encode(bytearray(rgb.tobytes()), w, h)
-    injector.put_32bit_integer(len(fec_data) * 8)
-    injector.put_bytes(fec_data)
+    #fec_data = fec_encode(bytearray(rgb.tobytes()), w, h)
+    #injector.put_32bit_integer(len(fec_data) * 8)
+    #injector.put_bytes(fec_data)
     injector.finalize()
     return Image.fromarray(injector.data)
 
