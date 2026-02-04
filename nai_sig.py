@@ -15,6 +15,7 @@ from gzip import decompress as gzip_decompress
 from dataclasses import dataclass, asdict
 import io
 import sys
+import argparse
 
 ImageArray = NDArray[np.int8]
 log = logging.getLogger(__name__)
@@ -314,14 +315,20 @@ class InputError(Exception):
 
 
 def main():
-    # Check if there's input from stdin
-    if sys.stdin.isatty():
-        raise InputError("No input provided. Please pipe an image file to the script.")
+    parser = argparse.ArgumentParser(description="Verify NovelAI image metadata")
+    parser.add_argument("-i", "--input", help="Path to image file")
+    args = parser.parse_args()
 
-    # read from stdin into PIL Image
-    image_bytes = sys.stdin.buffer.read()
-    image_buffer = io.BytesIO(image_bytes)
-    image = Image.open(image_buffer)
+    if args.input:
+        # Read from file
+        image = Image.open(args.input)
+    elif not sys.stdin.isatty():
+        # Read from stdin
+        image_bytes = sys.stdin.buffer.read()
+        image_buffer = io.BytesIO(image_bytes)
+        image = Image.open(image_buffer)
+    else:
+        raise InputError("No input provided. Use -i <image path> or pipe an image to stdin.")
 
     if not is_image_allowed_format(image):
         raise InputError(f"Invalid format, got {image.format}")
