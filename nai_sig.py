@@ -15,6 +15,7 @@ from gzip import decompress as gzip_decompress
 from dataclasses import dataclass, asdict
 import io
 import sys
+import os
 import argparse
 
 ImageArray = NDArray[np.int8]
@@ -160,7 +161,6 @@ def _verify_signed_hash(
     try:
         _ = verify_key.verify(image_and_comment, signed_hash)
     except BadSignatureError:
-        log.exception("failed to verify")
         return False
 
     return True
@@ -328,7 +328,9 @@ def main():
         image_buffer = io.BytesIO(image_bytes)
         image = Image.open(image_buffer)
     else:
-        raise InputError("No input provided. Use -i <image path> or pipe an image to stdin.")
+        raise InputError(
+            "No input provided. Use -i <image path> or pipe an image to stdin."
+        )
 
     if not is_image_allowed_format(image):
         raise InputError(f"Invalid format, got {image.format}")
@@ -364,7 +366,11 @@ def main():
             )
 
     result.success = True
-    print(json_dumps(asdict(result)))
+    if os.environ.get("JSON", "0") == "1":
+        print(json_dumps(asdict(result)))
+    else:
+        # NOTE: more strict checkers should do `and` instead of `or`
+        print(f"Is image NovelAI? {result.is_novelai_alpha or result.is_novelai_file}")
 
 
 if __name__ == "__main__":
